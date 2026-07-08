@@ -1,0 +1,37 @@
+{
+  "1201": {
+    "id": 1201,
+    "subject": "請求APIの性能改善",
+    "status": {"id": 4, "name": "レビュー中"},
+    "status_names": [
+      {"id": 1, "name": "new"},
+      {"id": 2, "name": "assigned"},
+      {"id": 3, "name": "in Progress"},
+      {"id": 4, "name": "レビュー中"}
+    ],
+    "created_on": "2026-03-20T09:00:00Z",
+    "journals": [
+      {
+        "id": 1,
+        "created_on": "2026-04-02T09:00:00Z",
+        "details": [
+          {"property": "attr", "name": "status_id", "old_value": "1", "new_value": "2"}
+        ]
+      },
+      {
+        "id": 2,
+        "created_on": "2026-04-08T09:00:00Z",
+        "details": [
+          {"property": "attr", "name": "status_id", "old_value": "2", "new_value": "3"}
+        ]
+      },
+      {
+        "id": 3,
+        "created_on": "2026-05-05T09:00:00Z",
+        "details": [
+          {"property": "attr", "name": "status_id", "old_value": "3", "new_value": "4"}
+        ]
+      }
+    ]
+  }
+}

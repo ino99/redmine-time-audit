@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+.venv/
+venv/
+output/
+*.csv
+.DS_Store
+.vscode/
+.idea/

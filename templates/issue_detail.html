@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue詳細分析</title>
+  <script>
+    document.documentElement.dataset.theme = localStorage.getItem("redmine-time-audit-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  </script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='theme.js') }}" defer></script>
+</head>
+<body>
+  <main class="app-shell detail-shell"
+    data-issue-id="{{ issue_id }}"
+    data-from="{{ start_date }}"
+    data-to="{{ end_date }}"
+    data-sample-mode="{{ sample_mode }}">
+    <section class="toolbar">
+      <div>
+        <h1 id="issueTitle">Issue #{{ issue_id }}</h1>
+        <p id="issueMeta">ステータス遷移と作業時間の分布を読み込み中です。</p>
+      </div>
+      <div class="toolbar-actions">
+        <button id="themeToggleButton" class="btn btn-outline-secondary" type="button">ダーク</button>
+        <a id="redmineIssueLink" class="btn btn-outline-primary" href="#" target="_blank" rel="noopener noreferrer">Redmine</a>
+      </div>
+    </section>
+
+    <div id="detailErrorBox" class="alert alert-danger d-none" role="alert"></div>
+
+    <section class="summary-grid detail-summary" aria-label="Issueサマリー">
+      <div class="metric"><span>Issue</span><strong id="detailIssueId">-</strong></div>
+      <div class="metric"><span>対象期間</span><strong id="detailPeriod">-</strong></div>
+      <div class="metric"><span>総作業時間</span><strong id="detailTotalHours">0h</strong></div>
+      <div class="metric"><span>ステータス数</span><strong id="detailStatusCount">0</strong></div>
+    </section>
+
+    <section class="panel wide">
+      <div class="panel-header">
+        <h2>ステータス別 作業時間フロー</h2>
+      </div>
+      <div id="flowDiagram" class="flow-diagram"></div>
+    </section>
+
+    <section class="content-grid detail-grid">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ステータス別 内訳</h2>
+        </div>
+        <div id="statusBreakdown" class="status-breakdown"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          <h2>ステータス遷移履歴</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>変更日時</th><th>遷移</th></tr></thead>
+            <tbody id="transitionTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='issue_detail.js') }}"></script>
+</body>
+</html>

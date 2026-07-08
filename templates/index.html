@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Redmine 作業時間棚卸</title>
+  <script>
+    document.documentElement.dataset.theme = localStorage.getItem("redmine-time-audit-theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  </script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='theme.js') }}" defer></script>
+</head>
+<body>
+  <main class="app-shell">
+    <section class="toolbar">
+      <div>
+        <h1>Redmine 作業時間棚卸</h1>
+        <p>四半期ごとの作業時間、偏り、改善候補をローカルで確認できます。</p>
+      </div>
+      <div class="toolbar-actions">
+        <button id="themeToggleButton" class="btn btn-outline-secondary" type="button">ダーク</button>
+        <button id="excelExportButton" class="btn btn-success" type="button" disabled>Excel出力</button>
+        <div id="sourceBadge" class="source-badge">未分析</div>
+      </div>
+    </section>
+
+    <section class="filters" aria-label="条件指定">
+      <div class="field">
+        <label for="fromDate">開始日</label>
+        <input id="fromDate" class="form-control" type="date" value="{{ default_start }}">
+      </div>
+      <div class="field">
+        <label for="toDate">終了日</label>
+        <input id="toDate" class="form-control" type="date" value="{{ default_end }}">
+      </div>
+      <div class="field">
+        <label for="quarterPreset">四半期プリセット</label>
+        <select id="quarterPreset" class="form-select">
+          <option value="">手入力</option>
+          <option value="this_q1">今年Q1</option>
+          <option value="this_q2">今年Q2</option>
+          <option value="this_q3">今年Q3</option>
+          <option value="this_q4">今年Q4</option>
+          <option value="previous_quarter">前四半期</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="projectId">プロジェクトID</label>
+        <input id="projectId" class="form-control" type="text" value="{{ default_project_id }}" placeholder="任意">
+      </div>
+      <div class="field version-field">
+        <label for="versionFilter">対象バージョン</label>
+        <select id="versionFilter" class="form-select" multiple disabled></select>
+      </div>
+      <label class="sample-toggle">
+        <input id="sampleMode" type="checkbox">
+        <span>サンプルモード</span>
+      </label>
+      <button id="analyzeButton" class="btn btn-primary" type="button">分析実行</button>
+    </section>
+
+    <div id="errorBox" class="alert alert-danger d-none" role="alert"></div>
+
+    <section class="summary-grid" aria-label="サマリー">
+      <div class="metric"><span>総作業時間</span><strong id="totalHours">0h</strong></div>
+      <div class="metric"><span>対象ユーザー数</span><strong id="userCount">0</strong></div>
+      <div class="metric"><span>対象Issue数</span><strong id="issueCount">0</strong></div>
+      <div class="metric"><span>作業記録数</span><strong id="entryCount">0</strong></div>
+      <div class="metric"><span>平均時間 / Issue</span><strong id="avgHours">0h</strong></div>
+      <div class="metric"><span>最大時間Issue</span><strong id="maxIssue">-</strong></div>
+    </section>
+
+    <section class="content-grid">
+      <div class="panel wide">
+        <div class="panel-header">
+          <h2>ユーザー別 作業時間ランキング Top 10</h2>
+          <button class="btn btn-outline-secondary btn-sm export-button" data-export="user_ranking">CSV</button>
+        </div>
+        <canvas id="userRankingChart" height="120"></canvas>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>ユーザー</th><th class="text-end">合計時間</th></tr></thead>
+            <tbody id="userRankingTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>作業分類別 作業時間</h2>
+          <button class="btn btn-outline-secondary btn-sm export-button" data-export="activity_summary">CSV</button>
+        </div>
+        <canvas id="activityChart" height="180"></canvas>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>分類</th><th class="text-end">時間</th></tr></thead>
+            <tbody id="activityTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>プロジェクト別 作業時間</h2>
+          <button class="btn btn-outline-secondary btn-sm export-button" data-export="project_summary">CSV</button>
+        </div>
+        <canvas id="projectChart" height="180"></canvas>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead><tr><th>プロジェクト</th><th class="text-end">時間</th></tr></thead>
+            <tbody id="projectTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel wide">
+        <div class="panel-header">
+          <div>
+            <h2>ユーザーごとの作業時間が多いIssue Top 10</h2>
+            <select id="userSelect" class="form-select form-select-sm"></select>
+          </div>
+          <button class="btn btn-outline-secondary btn-sm export-button" data-export="user_issue_top10">CSV</button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Issue</th>
+                <th>題名</th>
+                <th>バージョン</th>
+                <th class="text-end">合計時間</th>
+                <th>作業分類内訳</th>
+              </tr>
+            </thead>
+            <tbody id="userIssueTable"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel wide">
+        <div class="panel-header">
+          <h2>棚卸アラート</h2>
+          <button class="btn btn-outline-secondary btn-sm export-button" data-export="raw_time_entries">Raw CSV</button>
+        </div>
+        <div id="alerts" class="alerts"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
