@@ -1,7 +1,7 @@
 import io
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -18,6 +18,7 @@ SAMPLE_PATH = os.path.join(BASE_DIR, "sample_data", "sample_time_entries.json")
 SAMPLE_ISSUE_DETAILS_PATH = os.path.join(BASE_DIR, "sample_data", "sample_issue_details.json")
 CSV_OUTPUT_DIR = os.path.join(BASE_DIR, "output", "csv")
 EXCEL_OUTPUT_DIR = os.path.join(BASE_DIR, "output", "excel")
+JST = timezone(timedelta(hours=9))
 
 
 def parse_date(value, field_name):
@@ -32,9 +33,12 @@ def parse_datetime(value):
         return None
     normalized = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized).replace(tzinfo=None)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(JST).replace(tzinfo=None)
 
 
 def redmine_config():
@@ -96,6 +100,8 @@ def flatten_entry(entry):
         "issue_id": issue.get("id"),
         "issue_subject": issue.get("subject") or "",
         "issue_fixed_version_id": (issue.get("fixed_version") or {}).get("id"),
+        "issue_status_count": issue.get("status_count", 0),
+        "issue_transition_count": issue.get("transition_count", 0),
         "issue_fixed_version_name": (issue.get("fixed_version") or {}).get("name") or "",
         "activity_name": (entry.get("activity") or {}).get("name") or "未設定",
         "comments": entry.get("comments") or "",
@@ -121,14 +127,21 @@ def enrich_issue_details(entries, redmine_url, headers):
             response = requests.get(
                 f"{redmine_url}/issues/{issue_id}.json",
                 headers=headers,
+                params={"include": "journals"},
                 timeout=30,
             )
             if response.status_code >= 400:
                 continue
             issue_payload = response.json().get("issue") or {}
+            changes = status_change_details(issue_payload)
+            status_ids = [
+                changes[0].get("old_value") if changes else (issue_payload.get("status") or {}).get("id")
+            ] + [change.get("new_value") for change in changes]
             details[issue_id] = {
                 "subject": issue_payload.get("subject") or "",
                 "fixed_version": issue_payload.get("fixed_version") or {},
+                "status_count": len({str(value) for value in status_ids if value is not None}) or 1,
+                "transition_count": len(changes),
             }
         except requests.RequestException:
             continue
@@ -141,6 +154,8 @@ def enrich_issue_details(entries, redmine_url, headers):
                 issue["subject"] = details[issue_id]["subject"]
             if details[issue_id].get("fixed_version"):
                 issue["fixed_version"] = details[issue_id]["fixed_version"]
+            issue["status_count"] = details[issue_id].get("status_count", 0)
+            issue["transition_count"] = details[issue_id].get("transition_count", 0)
             entry["issue"] = issue
 
     return entries
@@ -240,6 +255,8 @@ def fetch_redmine_issue_flow(issue_id, start_date, end_date):
 def load_sample_entries(start_date, end_date, project_id=None):
     with open(SAMPLE_PATH, "r", encoding="utf-8") as f:
         payload = json.load(f)
+    with open(SAMPLE_ISSUE_DETAILS_PATH, "r", encoding="utf-8") as f:
+        issue_details = json.load(f)
 
     start = parse_date(start_date, "開始日")
     end = parse_date(end_date, "終了日")
@@ -250,6 +267,15 @@ def load_sample_entries(start_date, end_date, project_id=None):
             continue
         if project_id and str((entry.get("project") or {}).get("id")) != str(project_id):
             continue
+        issue = entry.get("issue") or {}
+        detail = issue_details.get(str(issue.get("id"))) or {}
+        changes = status_change_details(detail)
+        status_ids = [
+            changes[0].get("old_value") if changes else (detail.get("status") or {}).get("id")
+        ] + [change.get("new_value") for change in changes]
+        issue["status_count"] = len({str(value) for value in status_ids if value is not None}) or 1
+        issue["transition_count"] = len(changes)
+        entry["issue"] = issue
         entries.append(entry)
     return entries
 
@@ -405,12 +431,14 @@ def build_analysis_from_rows(rows, redmine_url=None):
         df = pd.DataFrame(columns=[
             "id", "spent_on", "hours", "user_name", "project_name",
             "issue_id", "issue_subject", "issue_fixed_version_id",
-            "issue_fixed_version_name", "activity_name", "comments",
+            "issue_fixed_version_name", "issue_status_count",
+            "issue_transition_count", "activity_name", "comments",
         ])
     for column in [
         "id", "spent_on", "hours", "user_name", "project_name",
         "issue_id", "issue_subject", "issue_fixed_version_id",
-        "issue_fixed_version_name", "activity_name", "comments",
+        "issue_fixed_version_name", "issue_status_count",
+        "issue_transition_count", "activity_name", "comments",
     ]:
         if column not in df.columns:
             df[column] = None
@@ -456,31 +484,39 @@ def build_analysis_from_rows(rows, redmine_url=None):
                 ),
                 version_name=df["issue_fixed_version_name"].apply(version_label),
             )
-            .groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "activity_name"], dropna=False)["hours"]
+            .groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count", "activity_name"], dropna=False)["hours"]
             .sum()
             .reset_index()
         )
         totals = (
-            grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url"], dropna=False)["hours"]
+            grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count"], dropna=False)["hours"]
             .sum()
             .reset_index()
             .sort_values(["user_name", "hours"], ascending=[True, False])
         )
         breakdown_rows = []
-        for keys, group in grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url"], dropna=False):
-            user_name, issue_key, issue_title, version_name, url = keys
+        for keys, group in grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count"], dropna=False):
+            user_name, issue_key, issue_title, version_name, url, status_count, transition_count = keys
             breakdown_rows.append({
                 "user_name": user_name,
                 "issue_key": issue_key,
                 "issue_title": issue_title,
                 "version_name": version_name,
                 "issue_url": url,
+                "issue_status_count": status_count,
+                "issue_transition_count": transition_count,
                 "activity_breakdown": ", ".join(
                     f"{row.activity_name}: {row.hours:.2f}h" for row in group.itertuples()
                 ),
             })
         breakdowns = pd.DataFrame(breakdown_rows)
         user_issue_df = totals.merge(breakdowns, on=["user_name", "issue_key", "issue_title", "version_name", "issue_url"], how="left")
+        for count_field in ["issue_status_count", "issue_transition_count"]:
+            left_field = f"{count_field}_x"
+            right_field = f"{count_field}_y"
+            if left_field in user_issue_df.columns:
+                user_issue_df[count_field] = user_issue_df[left_field].fillna(user_issue_df.get(right_field, 0))
+                user_issue_df = user_issue_df.drop(columns=[field for field in [left_field, right_field] if field in user_issue_df.columns])
         user_issue_df = user_issue_df.groupby("user_name", group_keys=False).head(10)
         user_issue_df = user_issue_df.rename(columns={
             "issue_key": "issue_id",

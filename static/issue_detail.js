@@ -28,7 +28,7 @@ function renderFlow(data) {
   byId("detailIssueId").textContent = `#${data.issue.id}`;
   byId("detailPeriod").textContent = `${document.querySelector(".detail-shell").dataset.from} - ${document.querySelector(".detail-shell").dataset.to}`;
   byId("detailTotalHours").textContent = hours(data.issue.total_hours);
-  byId("detailStatusCount").textContent = data.nodes.length;
+  byId("detailStatusCount").textContent = `${data.nodes.length} / ${(data.transitions || []).length}回`;
 
   const redmineLink = byId("redmineIssueLink");
   if (data.issue.url) {
@@ -37,20 +37,40 @@ function renderFlow(data) {
     redmineLink.classList.add("disabled");
   }
 
-  renderFlowDiagram(data.nodes);
+  renderFlowDiagram(data.nodes, data.transitions);
   renderBreakdown(data.nodes);
   renderTransitions(data.transitions);
 }
 
-function renderFlowDiagram(nodes) {
+function renderFlowDiagram(nodes, transitions) {
   const container = byId("flowDiagram");
   container.innerHTML = "";
-  if (!nodes.length) {
+  transitions = transitions || [];
+  const statusByName = new Map(nodes.map((node) => [node.status_name, node]));
+  const historyNodes = nodes;
+  const transitionGroups = new Map();
+  transitions.forEach((transition) => {
+    const key = [transition.from, transition.to].sort().join("\u0000");
+    if (!transitionGroups.has(key)) {
+      transitionGroups.set(key, []);
+    }
+    transitionGroups.get(key).push(transition);
+  });
+
+  if (!historyNodes.length) {
     container.textContent = "ステータス遷移がありません。";
     return;
   }
 
-  nodes.forEach((node, index) => {
+  historyNodes.forEach((historyNode, index) => {
+    const node = statusByName.get(historyNode.status_name) || {
+      status_name: historyNode.status_name,
+      hours: 0,
+      share: 0,
+    };
+    const flowItem = document.createElement("div");
+    flowItem.className = "flow-item";
+
     const nodeEl = document.createElement("div");
     nodeEl.className = "flow-node";
     nodeEl.style.setProperty("--intensity", String(Math.max(node.share, 0.12)));
@@ -70,15 +90,39 @@ function renderFlowDiagram(nodes) {
     inner.appendChild(value);
     inner.appendChild(bar);
     nodeEl.appendChild(inner);
-    container.appendChild(nodeEl);
+    flowItem.appendChild(nodeEl);
 
-    if (index < nodes.length - 1) {
+    if (index < historyNodes.length - 1) {
       const arrow = document.createElement("div");
       arrow.className = "flow-arrow";
       arrow.textContent = "→";
-      container.appendChild(arrow);
+      flowItem.appendChild(arrow);
     }
+
+    if (index < historyNodes.length - 1) {
+      const nextStatus = historyNodes[index + 1].status_name;
+      const key = [node.status_name, nextStatus].sort().join("\u0000");
+      const connector = document.createElement("div");
+      connector.className = "flow-connector";
+      (transitionGroups.get(key) || []).forEach((transition) => {
+        const transitionArrow = document.createElement("span");
+        transitionArrow.className = "flow-transition-arrow";
+        transitionArrow.textContent = transition.from === node.status_name ? "→" : "←";
+        transitionArrow.title = `${formatDateTime(transition.changed_at)} ${transition.from} → ${transition.to}`;
+        connector.appendChild(transitionArrow);
+      });
+      if (!connector.childElementCount) {
+        connector.textContent = "→";
+      }
+      flowItem.appendChild(connector);
+    }
+
+    container.appendChild(flowItem);
   });
+}
+
+function formatDateTime(value) {
+  return value ? value.replace("T", " ").slice(0, 16) : "";
 }
 
 function renderBreakdown(nodes) {

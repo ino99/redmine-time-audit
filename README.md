@@ -1,5 +1,26 @@
 # Redmine Time Audit
 
+## Windows での起動
+
+PowerShell:
+
+```powershell
+cd redmine-time-audit
+powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1
+```
+
+コマンドプロンプト:
+
+```bat
+cd redmine-time-audit
+scripts\run_windows.bat
+```
+
+初回実行時に `.venv` の作成、依存関係のインストール、`.env` の作成を行います。
+起動後、ブラウザで `http://127.0.0.1:5000` を開いてください。
+
+OneDrive 配下で `__pycache__` のアクセス拒否が出る場合があるため、付属の Windows 起動スクリプトは `PYTHONDONTWRITEBYTECODE=1` を設定して起動します。
+
 Redmine の `/time_entries.json` から作業時間を読み取り、四半期ごとの作業効率を棚卸するローカル Web アプリです。Redmine 側への更新は行いません。
 
 ## セットアップ

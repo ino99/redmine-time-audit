@@ -177,6 +177,8 @@ function renderUserIssueTable() {
     { key: "issue_fixed_version_name" },
     { key: "hours", align: "end", format: hours },
     { key: "activity_breakdown" },
+    { key: "issue_status_count", align: "end" },
+    { key: "issue_transition_count", align: "end", format: (value) => `${value || 0}回` },
   ]);
 }
 
