@@ -21,6 +21,24 @@ scripts\run_windows.bat
 
 OneDrive 配下で `__pycache__` のアクセス拒否が出る場合があるため、付属の Windows 起動スクリプトは `PYTHONDONTWRITEBYTECODE=1` を設定して起動します。
 
+### Windowsログオン時にバックグラウンド起動
+
+ブラウザを起動せず、WindowsへログオンしたときにFlaskサーバーだけをバックグラウンドで起動する場合:
+
+```powershell
+cd redmine-time-audit
+powershell -ExecutionPolicy Bypass -File .\scripts\register_windows_startup.ps1
+```
+
+登録後はPCへのログオン時に自動起動します。ブラウザは自動起動しないため、必要なときに `http://127.0.0.1:5000` を開いてください。
+サーバーはバックグラウンドで常駐します。
+
+自動起動を解除する場合:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\unregister_windows_startup.ps1
+```
+
 Redmine の `/time_entries.json` から作業時間を読み取り、四半期ごとの作業効率を棚卸するローカル Web アプリです。Redmine 側への更新は行いません。
 
 ## セットアップ

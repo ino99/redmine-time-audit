@@ -815,15 +815,16 @@ def export_csv(export_name):
         return jsonify({"error": "未対応のCSV種別です。"}), 404
 
     df = pd.DataFrame(export_map[export_name])
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False, encoding="utf-8-sig")
+    csv_text = df.to_csv(index=False)
+    csv_bytes = csv_text.encode("utf-8-sig")
     filename = f"{export_name}.csv"
     os.makedirs(CSV_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(CSV_OUTPUT_DIR, filename), "w", encoding="utf-8-sig", newline="") as f:
-        f.write(csv_buffer.getvalue())
+    with open(os.path.join(CSV_OUTPUT_DIR, filename), "wb") as f:
+        f.write(csv_bytes)
     return Response(
-        csv_buffer.getvalue(),
-        mimetype="text/csv; charset=utf-8",
+        csv_bytes,
+        mimetype="text/csv",
+        content_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 

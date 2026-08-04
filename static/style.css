@@ -210,6 +210,20 @@ p {
   margin-bottom: 12px;
 }
 
+.content-grid > .panel .panel-header {
+  cursor: grab;
+}
+
+.content-grid > .panel .panel-header:active {
+  cursor: grabbing;
+}
+
+.content-grid > .panel.is-dragging {
+  opacity: .55;
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+}
+
 .panel-header .form-select {
   margin-top: 8px;
   width: min(280px, 100%);
@@ -230,6 +244,29 @@ canvas {
 .table th {
   color: var(--muted);
   font-size: .82rem;
+}
+
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button:hover,
+.table-sort-button:focus-visible {
+  color: var(--accent);
+}
+
+.sort-indicator {
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .table a {

@@ -1,6 +1,8 @@
 let latestAnalysis = null;
 let baseAnalysis = null;
 const charts = {};
+const ANALYSIS_STORAGE_KEY = "redmine-time-audit-last-analysis";
+const GADGET_ORDER_KEY = "redmine-time-audit-gadget-order";
 
 const palette = ["#2563eb", "#16a34a", "#f59e0b", "#dc2626", "#7c3aed", "#0891b2", "#4b5563", "#db2777", "#65a30d", "#ea580c"];
 
@@ -168,9 +170,63 @@ function renderVersionOptions(data) {
   select.disabled = !(data.versions || []).length;
 }
 
+let userIssueSort = { key: "hours", direction: "desc" };
+
+function sortUserIssueRows(rows) {
+  const multiplier = userIssueSort.direction === "asc" ? 1 : -1;
+  return [...rows].sort((left, right) => {
+    const leftValue = Number(left[userIssueSort.key] || 0);
+    const rightValue = Number(right[userIssueSort.key] || 0);
+    return (leftValue - rightValue) * multiplier;
+  });
+}
+
+function updateUserIssueSortIndicators() {
+  document.querySelectorAll("#userIssueSortHeaders [data-sort-key]").forEach((button) => {
+    const isActive = button.dataset.sortKey === userIssueSort.key;
+    button.querySelector(".sort-indicator").textContent = isActive
+      ? (userIssueSort.direction === "asc" ? "↑" : "↓")
+      : "↕";
+    button.setAttribute("aria-sort", isActive ? userIssueSort.direction : "none");
+  });
+}
+
+function setupUserIssueSortHeaders() {
+  const table = byId("userIssueTable")?.closest("table");
+  const headerRow = table?.querySelector("thead tr");
+  if (!headerRow) return;
+  headerRow.id = "userIssueSortHeaders";
+  [
+    { index: 3, key: "hours", label: "合計時間" },
+    { index: 5, key: "issue_status_count", label: "ステータス数" },
+    { index: 6, key: "issue_transition_count", label: "遷移回数" },
+  ].forEach(({ index, key, label }) => {
+    const header = headerRow.children[index];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "table-sort-button";
+    button.dataset.sortKey = key;
+    button.innerHTML = `${label} <span class="sort-indicator" aria-hidden="true">↕</span>`;
+    button.addEventListener("click", () => {
+      if (userIssueSort.key === key) {
+        userIssueSort.direction = userIssueSort.direction === "asc" ? "desc" : "asc";
+      } else {
+        userIssueSort = { key, direction: "desc" };
+      }
+      updateUserIssueSortIndicators();
+      renderUserIssueTable();
+    });
+    header.textContent = "";
+    header.appendChild(button);
+  });
+  updateUserIssueSortIndicators();
+}
+
 function renderUserIssueTable() {
   const selectedUser = byId("userSelect").value;
-  const rows = (latestAnalysis?.user_issue_top10 || []).filter((row) => row.user_name === selectedUser);
+  const rows = sortUserIssueRows(
+    (latestAnalysis?.user_issue_top10 || []).filter((row) => row.user_name === selectedUser),
+  );
   renderRows("userIssueTable", rows, [
     { key: "issue_id", render: issueLink },
     { key: "issue_subject" },
@@ -180,6 +236,117 @@ function renderUserIssueTable() {
     { key: "issue_status_count", align: "end" },
     { key: "issue_transition_count", align: "end", format: (value) => `${value || 0}回` },
   ]);
+}
+
+function formatUpdatedAt(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function setLastUpdated(value) {
+  byId("lastUpdated").textContent = `最終更新: ${formatUpdatedAt(value)}`;
+}
+
+function saveAnalysisState(data, updatedAt) {
+  try {
+    localStorage.setItem(ANALYSIS_STORAGE_KEY, JSON.stringify({
+      data,
+      baseData: baseAnalysis,
+      updatedAt,
+    }));
+  } catch (error) {
+    console.warn("分析結果を保存できませんでした", error);
+  }
+}
+
+function restoreFormState(criteria) {
+  if (!criteria) return;
+  if (criteria.from) byId("fromDate").value = criteria.from;
+  if (criteria.to) byId("toDate").value = criteria.to;
+  if (criteria.project_id !== undefined) byId("projectId").value = criteria.project_id;
+  if (criteria.sample_mode !== undefined) byId("sampleMode").checked = Boolean(criteria.sample_mode);
+}
+
+function restoreVersionSelection(criteria) {
+  const selected = new Set(criteria?.versions || []);
+  Array.from(byId("versionFilter").options).forEach((option) => {
+    option.selected = selected.has(option.value);
+  });
+}
+
+function setupGadgetDragging() {
+  const grid = document.querySelector(".content-grid");
+  if (!grid) return;
+
+  const definitions = [
+    ["#userRankingChart", "user-ranking"],
+    ["#activityChart", "activity-summary"],
+    ["#projectChart", "project-summary"],
+    ["#userIssueTable", "user-issue-top10"],
+    ["#alerts", "alerts"],
+  ];
+  const panels = Array.from(grid.querySelectorAll(":scope > .panel"));
+  definitions.forEach(([selector, id]) => {
+    document.querySelector(selector)?.closest(".panel")?.setAttribute("data-gadget-id", id);
+  });
+
+  try {
+    const savedOrder = JSON.parse(localStorage.getItem(GADGET_ORDER_KEY) || "[]");
+    const panelById = new Map(panels.map((panel) => [panel.dataset.gadgetId, panel]));
+    savedOrder.forEach((id) => {
+      const panel = panelById.get(id);
+      if (panel) grid.appendChild(panel);
+    });
+  } catch (error) {
+    localStorage.removeItem(GADGET_ORDER_KEY);
+  }
+
+  let draggedPanel = null;
+  const saveOrder = () => {
+    const order = Array.from(grid.querySelectorAll(":scope > .panel"))
+      .map((panel) => panel.dataset.gadgetId)
+      .filter(Boolean);
+    localStorage.setItem(GADGET_ORDER_KEY, JSON.stringify(order));
+  };
+
+  grid.querySelectorAll(":scope > .panel").forEach((panel) => {
+    panel.draggable = true;
+    panel.addEventListener("dragstart", (event) => {
+      if (!event.target.closest(".panel-header") || event.target.closest("button, select, input, a")) {
+        event.preventDefault();
+        return;
+      }
+      draggedPanel = panel;
+      panel.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", panel.dataset.gadgetId || "");
+    });
+    panel.addEventListener("dragend", () => {
+      panel.classList.remove("is-dragging");
+      draggedPanel = null;
+      saveOrder();
+    });
+  });
+
+  grid.addEventListener("dragover", (event) => {
+    if (!draggedPanel) return;
+    event.preventDefault();
+    const target = event.target.closest(".panel");
+    if (!target || target.parentElement !== grid || target === draggedPanel) return;
+    const rect = target.getBoundingClientRect();
+    const insertAfter = event.clientY > rect.top + rect.height / 2;
+    grid.insertBefore(draggedPanel, insertAfter ? target.nextSibling : target);
+  });
 }
 
 function renderAlerts(alerts) {
@@ -232,9 +399,11 @@ function appendAlertMessage(container, alert) {
 
 function renderAnalysis(data, options = {}) {
   latestAnalysis = data;
+  restoreFormState(data.criteria);
   byId("excelExportButton").disabled = false;
   if (options.updateVersionOptions) {
     renderVersionOptions(data);
+    restoreVersionSelection(data.criteria);
   }
   const versionCount = selectedVersions().length;
   const sourceLabel = data.source === "sample" ? "サンプルデータ" : "Redmine API";
@@ -268,6 +437,11 @@ function renderAnalysis(data, options = {}) {
   });
   renderUserIssueTable();
   renderAlerts(data.alerts);
+  const updatedAt = options.updatedAt || new Date().toISOString();
+  setLastUpdated(updatedAt);
+  if (options.persist !== false) {
+    saveAnalysisState(data, updatedAt);
+  }
 }
 
 async function applyPreset() {
@@ -415,8 +589,27 @@ byId("userSelect").addEventListener("change", renderUserIssueTable);
 document.querySelectorAll(".export-button").forEach((button) => {
   button.addEventListener("click", () => exportCsv(button.dataset.export));
 });
+setupUserIssueSortHeaders();
+setupGadgetDragging();
 document.addEventListener("themechange", () => {
   if (latestAnalysis) {
-    renderAnalysis(latestAnalysis);
+    renderAnalysis(latestAnalysis, { persist: false });
   }
 });
+
+function restoreLastAnalysis() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(ANALYSIS_STORAGE_KEY) || "null");
+    if (!stored?.data) return;
+    baseAnalysis = stored.baseData || stored.data;
+    renderAnalysis(stored.data, {
+      updateVersionOptions: true,
+      persist: false,
+      updatedAt: stored.updatedAt,
+    });
+  } catch (error) {
+    localStorage.removeItem(ANALYSIS_STORAGE_KEY);
+  }
+}
+
+restoreLastAnalysis();
