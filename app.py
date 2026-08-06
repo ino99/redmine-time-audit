@@ -1,6 +1,7 @@
 import io
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -102,6 +103,7 @@ def flatten_entry(entry):
         "issue_fixed_version_id": (issue.get("fixed_version") or {}).get("id"),
         "issue_status_count": issue.get("status_count", 0),
         "issue_transition_count": issue.get("transition_count", 0),
+        "issue_total_transition_count": issue.get("total_transition_count", 0),
         "issue_fixed_version_name": (issue.get("fixed_version") or {}).get("name") or "",
         "activity_name": (entry.get("activity") or {}).get("name") or "未設定",
         "comments": entry.get("comments") or "",
@@ -114,6 +116,64 @@ def issue_url(redmine_url, issue_id):
     return f"{redmine_url.rstrip('/')}/issues/{issue_label(issue_id)}"
 
 
+def fetch_issue_detail(issue_id, redmine_url, headers, assignee_names):
+    response = requests.get(
+        f"{redmine_url}/issues/{issue_id}.json",
+        headers=headers,
+        params={"include": "journals"},
+        timeout=(5, 30),
+    )
+    if response.status_code >= 400:
+        return None
+
+    issue_payload = response.json().get("issue") or {}
+    assignee_names = dict(assignee_names or {})
+    assignee_ids = set()
+    current_assignee_id = (issue_payload.get("assigned_to") or {}).get("id")
+    if current_assignee_id not in (None, 0, "0", ""):
+        assignee_ids.add(str(current_assignee_id))
+    for journal in issue_payload.get("journals") or []:
+        for detail in journal.get("details") or []:
+            if detail.get("property") != "attr" or detail.get("name") != "assigned_to_id":
+                continue
+            for value in (detail.get("old_value"), detail.get("new_value")):
+                if value not in (None, 0, "0", ""):
+                    assignee_ids.add(str(value))
+    for assignee_id in assignee_ids:
+        if assignee_id in assignee_names:
+            continue
+        try:
+            user_response = requests.get(
+                f"{redmine_url}/users/{assignee_id}.json",
+                headers=headers,
+                timeout=(5, 15),
+            )
+            if user_response.status_code < 400:
+                user = user_response.json().get("user") or {}
+                user_name = user.get("name") or " ".join(
+                    part for part in [user.get("firstname"), user.get("lastname")] if part
+                )
+                if user_name:
+                    assignee_names[assignee_id] = user_name
+        except (requests.RequestException, ValueError):
+            continue
+    history_events = remove_new_assignee_events(
+        issue_history_events(issue_payload, assignee_names)
+    )
+    changes = status_change_details(issue_payload)
+    status_ids = [
+        changes[0].get("old_value") if changes else (issue_payload.get("status") or {}).get("id")
+    ] + [change.get("new_value") for change in changes]
+    return {
+        "subject": issue_payload.get("subject") or "",
+        "fixed_version": issue_payload.get("fixed_version") or {},
+        "status_count": len({str(value) for value in status_ids if value is not None}) or 1,
+        "transition_count": assignee_transition_count(history_events),
+        "total_transition_count": transition_event_count(history_events),
+        "status_metrics_by_user": status_metrics_by_user(history_events),
+    }
+
+
 def enrich_issue_details(entries, redmine_url, headers):
     issue_ids = sorted({
         (entry.get("issue") or {}).get("id")
@@ -121,30 +181,33 @@ def enrich_issue_details(entries, redmine_url, headers):
         if (entry.get("issue") or {}).get("id")
     })
     details = {}
+    assignee_names_by_issue = {}
+    for entry in entries:
+        issue_id = (entry.get("issue") or {}).get("id")
+        user = entry.get("user") or {}
+        if issue_id and user.get("id") is not None and user.get("name"):
+            assignee_names_by_issue.setdefault(issue_id, {})[str(user["id"])] = user["name"]
 
-    for issue_id in issue_ids:
-        try:
-            response = requests.get(
-                f"{redmine_url}/issues/{issue_id}.json",
-                headers=headers,
-                params={"include": "journals"},
-                timeout=30,
-            )
-            if response.status_code >= 400:
+    max_workers = max(1, min(int(os.getenv("REDMINE_DETAIL_WORKERS", "8")), len(issue_ids) or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                fetch_issue_detail,
+                issue_id,
+                redmine_url,
+                headers,
+                assignee_names_by_issue.get(issue_id),
+            ): issue_id
+            for issue_id in issue_ids
+        }
+        for future in as_completed(futures):
+            issue_id = futures[future]
+            try:
+                result = future.result()
+            except (requests.RequestException, ValueError, TypeError):
                 continue
-            issue_payload = response.json().get("issue") or {}
-            changes = status_change_details(issue_payload)
-            status_ids = [
-                changes[0].get("old_value") if changes else (issue_payload.get("status") or {}).get("id")
-            ] + [change.get("new_value") for change in changes]
-            details[issue_id] = {
-                "subject": issue_payload.get("subject") or "",
-                "fixed_version": issue_payload.get("fixed_version") or {},
-                "status_count": len({str(value) for value in status_ids if value is not None}) or 1,
-                "transition_count": len(changes),
-            }
-        except requests.RequestException:
-            continue
+            if result is not None:
+                details[issue_id] = result
 
     for entry in entries:
         issue = entry.get("issue") or {}
@@ -154,8 +217,18 @@ def enrich_issue_details(entries, redmine_url, headers):
                 issue["subject"] = details[issue_id]["subject"]
             if details[issue_id].get("fixed_version"):
                 issue["fixed_version"] = details[issue_id]["fixed_version"]
-            issue["status_count"] = details[issue_id].get("status_count", 0)
-            issue["transition_count"] = details[issue_id].get("transition_count", 0)
+            user = entry.get("user") or {}
+            user_metrics = details[issue_id].get("status_metrics_by_user") or {}
+            metric = user_metric_for_entry(user_metrics, user)
+            if metric is None and not user_metrics:
+                metric = {
+                    "status_count": details[issue_id].get("status_count", 0),
+                    "transition_count": details[issue_id].get("transition_count", 0),
+                    "total_transition_count": details[issue_id].get("total_transition_count", 0),
+                }
+            issue["status_count"] = metric.get("status_count", 0) if metric else 0
+            issue["transition_count"] = metric.get("transition_count", 0) if metric else 0
+            issue["total_transition_count"] = details[issue_id].get("total_transition_count", 0)
             entry["issue"] = issue
 
     return entries
@@ -221,6 +294,37 @@ def fetch_redmine_issue_flow(issue_id, start_date, end_date):
             for status in statuses_response.json().get("issue_statuses", [])
         }
 
+    issue_payload = issue_response.json().get("issue") or {}
+    assignee_names = {}
+    assignee_ids = set()
+    current_assignee_id = (issue_payload.get("assigned_to") or {}).get("id")
+    if current_assignee_id not in (None, 0, "0", ""):
+        assignee_ids.add(str(current_assignee_id))
+    for journal in issue_payload.get("journals") or []:
+        for detail in journal.get("details") or []:
+            if detail.get("property") != "attr" or detail.get("name") != "assigned_to_id":
+                continue
+            for value in (detail.get("old_value"), detail.get("new_value")):
+                if value not in (None, 0, "0", ""):
+                    assignee_ids.add(str(value))
+    for assignee_id in assignee_ids:
+        try:
+            user_response = requests.get(
+                f"{redmine_url}/users/{assignee_id}.json",
+                headers=headers,
+                timeout=(5, 15),
+            )
+            if user_response.status_code >= 400:
+                continue
+            user = user_response.json().get("user") or {}
+            user_name = user.get("name") or " ".join(
+                part for part in [user.get("firstname"), user.get("lastname")] if part
+            )
+            if user_name:
+                assignee_names[assignee_id] = user_name
+        except (requests.RequestException, ValueError):
+            continue
+
     entries = []
     offset = 0
     limit = 100
@@ -249,7 +353,7 @@ def fetch_redmine_issue_flow(issue_id, start_date, end_date):
         if not batch or offset >= total_count:
             break
 
-    return build_issue_flow(issue_response.json().get("issue") or {}, entries, status_names, redmine_url)
+    return build_issue_flow(issue_payload, entries, status_names, redmine_url, assignee_names)
 
 
 def load_sample_entries(start_date, end_date, project_id=None):
@@ -269,12 +373,14 @@ def load_sample_entries(start_date, end_date, project_id=None):
             continue
         issue = entry.get("issue") or {}
         detail = issue_details.get(str(issue.get("id"))) or {}
+        history_events = remove_new_assignee_events(issue_history_events(detail))
         changes = status_change_details(detail)
         status_ids = [
             changes[0].get("old_value") if changes else (detail.get("status") or {}).get("id")
         ] + [change.get("new_value") for change in changes]
         issue["status_count"] = len({str(value) for value in status_ids if value is not None}) or 1
-        issue["transition_count"] = len(changes)
+        issue["transition_count"] = assignee_transition_count(history_events)
+        issue["total_transition_count"] = len(history_events)
         entry["issue"] = issue
         entries.append(entry)
     return entries
@@ -324,8 +430,173 @@ def status_change_details(issue):
                     "changed_at": changed_at,
                     "old_value": detail.get("old_value"),
                     "new_value": detail.get("new_value"),
+                    "user_id": (journal.get("user") or {}).get("id"),
+                    "user_name": (journal.get("user") or {}).get("name") or "",
                 })
     return sorted(changes, key=lambda item: item.get("changed_at") or datetime.min)
+
+
+def assignee_name(assignee_id, names):
+    if assignee_id in (None, "", 0, "0"):
+        return "未アサイン"
+    return names.get(str(assignee_id)) or f"担当者ID {assignee_id}"
+
+
+def issue_history_events(issue, assignee_names=None):
+    names = {str(key): value for key, value in (assignee_names or {}).items()}
+    current_assignee = (issue.get("assigned_to") or {}).get("id")
+    if current_assignee is not None:
+        current_name = (issue.get("assigned_to") or {}).get("name")
+        if current_name:
+            names[str(current_assignee)] = current_name
+
+    journals = []
+    for journal in issue.get("journals") or []:
+        status_detail = None
+        assignee_detail = None
+        progress_detail = None
+        for detail in journal.get("details") or []:
+            if detail.get("property") != "attr":
+                continue
+            if detail.get("name") == "status_id":
+                status_detail = detail
+            elif detail.get("name") == "assigned_to_id":
+                assignee_detail = detail
+            elif detail.get("name") == "done_ratio":
+                progress_detail = detail
+        if status_detail or assignee_detail or progress_detail:
+            journals.append({
+                "changed_at": parse_datetime(journal.get("created_on")),
+                "user_id": (journal.get("user") or {}).get("id"),
+                "user_name": (journal.get("user") or {}).get("name") or "",
+                "status": status_detail,
+                "assignee": assignee_detail,
+                "progress": progress_detail,
+            })
+    journals.sort(key=lambda item: item.get("changed_at") or datetime.min)
+
+    events = []
+    current_progress = (issue.get("done_ratio") or 0)
+    for journal in reversed(journals):
+        status_detail = journal.get("status")
+        assignee_detail = journal.get("assignee")
+        progress_detail = journal.get("progress")
+        events.append({
+            "changed_at": journal.get("changed_at"),
+            "user_id": journal.get("user_id"),
+            "user_name": journal.get("user_name") or "",
+            "type": "status" if status_detail else ("assignee" if assignee_detail else "progress"),
+            "status_old": status_detail.get("old_value") if status_detail else None,
+            "status_new": status_detail.get("new_value") if status_detail else None,
+            "assignee_old": assignee_detail.get("old_value") if assignee_detail else None,
+            "assignee_new": assignee_detail.get("new_value") if assignee_detail else None,
+            "progress_old": progress_detail.get("old_value") if progress_detail else None,
+            "progress_new": progress_detail.get("new_value") if progress_detail else None,
+            "progress_after": current_progress,
+            "assignee_after": current_assignee,
+        })
+        if assignee_detail:
+            current_assignee = assignee_detail.get("old_value")
+        if progress_detail:
+            current_progress = progress_detail.get("old_value")
+    events.reverse()
+
+    current_status = None
+    for event in events:
+        if event.get("type") == "status" and event.get("status_old") is not None:
+            current_status = event.get("status_old")
+            break
+    if current_status is None:
+        current_status = (issue.get("status") or {}).get("id")
+    for event in events:
+        event["status_before"] = current_status
+        if event.get("type") == "status":
+            current_status = event.get("status_new")
+        event["status_after"] = current_status
+        if event.get("progress_new") is not None:
+            current_progress = event.get("progress_new")
+        event["progress_after"] = current_progress
+
+    for event in events:
+        event["assignee_after_name"] = assignee_name(event.get("assignee_after"), names)
+        event["assignee_old_name"] = assignee_name(event.get("assignee_old"), names)
+        event["assignee_new_name"] = assignee_name(event.get("assignee_new"), names)
+    return events
+
+
+def is_new_status(status_id, status_names=None):
+    if str(status_id) == "1":
+        return True
+    return str((status_names or {}).get(str(status_id), "")).lower() == "new"
+
+
+def remove_new_assignee_events(events, status_names=None):
+    return [
+        event
+        for event in events
+        if not (
+            event.get("type") == "assignee"
+            and is_new_status(event.get("status_after"), status_names)
+        )
+    ]
+
+
+def assignee_transition_count(events):
+    return sum(
+        1
+        for event in events
+        if is_assignee_change(event)
+    )
+
+
+def transition_event_count(events):
+    return sum(1 for event in events if event.get("type") in {"status", "assignee"})
+
+
+def is_assignee_change(event):
+    old_value = event.get("assignee_old")
+    new_value = event.get("assignee_new")
+    if old_value is None and new_value is None:
+        return False
+    return str(old_value or "") != str(new_value or "")
+
+
+def user_metric_keys(user_id=None, user_name=None):
+    keys = []
+    if user_id is not None:
+        keys.append(f"id:{user_id}")
+    if user_name:
+        keys.append(f"name:{user_name}")
+    return keys
+
+
+def status_metrics_by_user(changes):
+    metrics = {}
+    for change in changes:
+        keys = user_metric_keys(change.get("user_id"), change.get("user_name"))
+        if not keys:
+            continue
+        for key in keys:
+            metric = metrics.setdefault(key, {"status_ids": set(), "transition_count": 0})
+            for status_id in [change.get("status_old", change.get("old_value")), change.get("status_new", change.get("new_value"))]:
+                if status_id is not None:
+                    metric["status_ids"].add(str(status_id))
+            if is_assignee_change(change):
+                metric["transition_count"] += 1
+    return {
+        key: {
+            "status_count": len(value["status_ids"]),
+            "transition_count": value["transition_count"],
+        }
+        for key, value in metrics.items()
+    }
+
+
+def user_metric_for_entry(metrics, user):
+    for key in user_metric_keys(user.get("id"), user.get("name")):
+        if key in metrics:
+            return metrics[key]
+    return None
 
 
 def entry_datetime(entry):
@@ -342,7 +613,7 @@ def status_for_entry(entry_at, changes, initial_status):
     return current
 
 
-def build_issue_flow(issue, entries, status_names, redmine_url=None):
+def build_issue_flow(issue, entries, status_names, redmine_url=None, assignee_names=None):
     changes = status_change_details(issue)
     current_status = issue.get("status") or {}
     initial_status = changes[0].get("old_value") if changes else current_status.get("id")
@@ -359,6 +630,7 @@ def build_issue_flow(issue, entries, status_names, redmine_url=None):
             "status_name": status_name(status_id, status_names, current_status.get("name") if str(status_id) == str(current_status.get("id")) else None),
             "hours": 0.0,
             "activities": {},
+            "activity_details": {},
             "entries": [],
         }
         for status_id in ordered_status_ids
@@ -373,12 +645,16 @@ def build_issue_flow(issue, entries, status_names, redmine_url=None):
                 "status_name": status_name(assigned_status, status_names),
                 "hours": 0.0,
                 "activities": {},
+                "activity_details": {},
                 "entries": [],
             }
             ordered_status_ids.append(assigned_status)
         hours_value = float(entry.get("hours") or 0)
         activity_name = (entry.get("activity") or {}).get("name") or "未設定"
+        user_name = (entry.get("user") or {}).get("name") or "未設定"
         status_hours[status_key]["hours"] += hours_value
+        activity_detail_key = (activity_name, user_name)
+        status_hours[status_key]["activity_details"][activity_detail_key] = status_hours[status_key]["activity_details"].get(activity_detail_key, 0) + hours_value
         status_hours[status_key]["activities"][activity_name] = status_hours[status_key]["activities"].get(activity_name, 0) + hours_value
         status_hours[status_key]["entries"].append(flatten_entry(entry))
 
@@ -395,9 +671,74 @@ def build_issue_flow(issue, entries, status_names, redmine_url=None):
                 {"activity_name": name, "hours": round(hours, 2)}
                 for name, hours in sorted(data["activities"].items(), key=lambda item: item[1], reverse=True)
             ],
+            "activity_details": [
+                {"activity_name": name, "hours": round(hours, 2), "assignee": assignee}
+                for (name, assignee), hours in sorted(data["activity_details"].items(), key=lambda item: item[1], reverse=True)
+            ],
             "entry_count": len(data["entries"]),
             "order": index,
         })
+
+    total_work_hours = sum(node["hours"] for node in nodes)
+    progress_by_status = {
+        node["status_name"]: round(
+            (node["hours"] / total_work_hours * 100) if total_work_hours else 0,
+            1,
+        )
+        for node in nodes
+    }
+
+    entry_assignee_names = {
+        str((entry.get("user") or {}).get("id")): (entry.get("user") or {}).get("name")
+        for entry in entries
+        if (entry.get("user") or {}).get("id") is not None and (entry.get("user") or {}).get("name")
+    }
+    assignee_names = {**(assignee_names or {}), **entry_assignee_names}
+    history_events = remove_new_assignee_events(
+        issue_history_events(issue, assignee_names), status_names
+    )
+    transition_rows = []
+    initial_status_name = status_name(initial_status, status_names)
+    if initial_status_name.lower() == "new":
+        transition_rows.append({
+            "type": "initial",
+            "progress_rate": 0.0,
+            "from": "",
+            "to": initial_status_name,
+            "assignee": "未アサイン",
+            "changed_at": issue.get("created_on") or "",
+        })
+    for event in history_events:
+        changed_at = event.get("changed_at")
+        if event.get("type") == "status":
+            transition_rows.append({
+                "type": "status",
+                "progress_rate": float(event.get("progress_after") or 0),
+                "from": status_name(event.get("status_old"), status_names),
+                "to": status_name(event.get("status_new"), status_names),
+                "assignee": event.get("assignee_after_name") or "未アサイン",
+                "assignee": event.get("assignee_after_name") or "未アサイン",
+                "changed_at": changed_at.isoformat() if changed_at else "",
+            })
+        elif event.get("type") == "assignee":
+            transition_rows.append({
+                "type": "assignee",
+                "progress_rate": float(event.get("progress_after") or 0),
+                "assignee": event.get("assignee_new_name") or "未アサイン",
+                "from": event.get("assignee_old_name") or "未アサイン",
+                "to": event.get("assignee_new_name") or "未アサイン",
+                "changed_at": changed_at.isoformat() if changed_at else "",
+            })
+
+        else:
+            transition_rows.append({
+                "type": "progress",
+                "from": "",
+                "to": "",
+                "assignee": event.get("assignee_after_name") or "未アサイン",
+                "progress_rate": float(event.get("progress_after") or 0),
+                "changed_at": changed_at.isoformat() if changed_at else "",
+            })
 
     return {
         "issue": {
@@ -408,14 +749,10 @@ def build_issue_flow(issue, entries, status_names, redmine_url=None):
             "total_hours": round(sum(float(entry.get("hours") or 0) for entry in entries), 2),
         },
         "nodes": nodes,
-        "transitions": [
-            {
-                "from": status_name(change.get("old_value"), status_names),
-                "to": status_name(change.get("new_value"), status_names),
-                "changed_at": change.get("changed_at").isoformat() if change.get("changed_at") else "",
-            }
-            for change in changes
-        ],
+        "transitions": transition_rows,
+        "status_transitions": [row for row in transition_rows if row["type"] == "status"],
+        "total_transition_count": transition_event_count(history_events),
+        "assignee_transition_count": assignee_transition_count(history_events),
         "time_entries": records(pd.DataFrame([flatten_entry(entry) for entry in entries])),
     }
 
@@ -432,13 +769,13 @@ def build_analysis_from_rows(rows, redmine_url=None):
             "id", "spent_on", "hours", "user_name", "project_name",
             "issue_id", "issue_subject", "issue_fixed_version_id",
             "issue_fixed_version_name", "issue_status_count",
-            "issue_transition_count", "activity_name", "comments",
+            "issue_transition_count", "issue_total_transition_count", "activity_name", "comments",
         ])
     for column in [
         "id", "spent_on", "hours", "user_name", "project_name",
         "issue_id", "issue_subject", "issue_fixed_version_id",
         "issue_fixed_version_name", "issue_status_count",
-        "issue_transition_count", "activity_name", "comments",
+        "issue_transition_count", "issue_total_transition_count", "activity_name", "comments",
     ]:
         if column not in df.columns:
             df[column] = None
@@ -484,19 +821,19 @@ def build_analysis_from_rows(rows, redmine_url=None):
                 ),
                 version_name=df["issue_fixed_version_name"].apply(version_label),
             )
-            .groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count", "activity_name"], dropna=False)["hours"]
+            .groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count", "issue_total_transition_count", "activity_name"], dropna=False)["hours"]
             .sum()
             .reset_index()
         )
         totals = (
-            grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count"], dropna=False)["hours"]
+            grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count", "issue_total_transition_count"], dropna=False)["hours"]
             .sum()
             .reset_index()
             .sort_values(["user_name", "hours"], ascending=[True, False])
         )
         breakdown_rows = []
-        for keys, group in grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count"], dropna=False):
-            user_name, issue_key, issue_title, version_name, url, status_count, transition_count = keys
+        for keys, group in grouped.groupby(["user_name", "issue_key", "issue_title", "version_name", "issue_url", "issue_status_count", "issue_transition_count", "issue_total_transition_count"], dropna=False):
+            user_name, issue_key, issue_title, version_name, url, status_count, transition_count, total_transition_count = keys
             breakdown_rows.append({
                 "user_name": user_name,
                 "issue_key": issue_key,
@@ -505,13 +842,14 @@ def build_analysis_from_rows(rows, redmine_url=None):
                 "issue_url": url,
                 "issue_status_count": status_count,
                 "issue_transition_count": transition_count,
+                "issue_total_transition_count": total_transition_count,
                 "activity_breakdown": ", ".join(
                     f"{row.activity_name}: {row.hours:.2f}h" for row in group.itertuples()
                 ),
             })
         breakdowns = pd.DataFrame(breakdown_rows)
         user_issue_df = totals.merge(breakdowns, on=["user_name", "issue_key", "issue_title", "version_name", "issue_url"], how="left")
-        for count_field in ["issue_status_count", "issue_transition_count"]:
+        for count_field in ["issue_status_count", "issue_transition_count", "issue_total_transition_count"]:
             left_field = f"{count_field}_x"
             right_field = f"{count_field}_y"
             if left_field in user_issue_df.columns:
@@ -654,6 +992,7 @@ def build_excel_workbook(data):
             [
                 "user_name", "issue_id", "issue_subject", "issue_fixed_version_name",
                 "issue_url", "hours", "activity_breakdown",
+                "issue_total_transition_count", "issue_transition_count",
             ],
         ),
         "作業分類別": dataframe_from_records(data.get("activity_summary"), ["activity_name", "hours"]),
@@ -713,6 +1052,7 @@ def issue_detail(issue_id):
         start_date=request.args.get("from", ""),
         end_date=request.args.get("to", ""),
         sample_mode=request.args.get("sample_mode", "false"),
+        redmine_url=(os.getenv("REDMINE_URL") or "").rstrip("/"),
     )
 
 
@@ -738,7 +1078,10 @@ def issue_flow(issue_id):
             flow = load_sample_issue_flow(issue_id, start.isoformat(), end.isoformat())
         else:
             flow = fetch_redmine_issue_flow(issue_id, start.isoformat(), end.isoformat())
-        return jsonify(flow)
+        response = jsonify(flow)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
     except requests.RequestException:
         return jsonify({"error": "Redmineに接続できませんでした。"}), 502
     except (RuntimeError, ValueError) as exc:

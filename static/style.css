@@ -48,6 +48,24 @@ html[data-theme="dark"] {
   box-sizing: border-box;
 }
 
+.loading-spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.5rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.15em;
+  animation: loading-spin 0.7s linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -434,6 +452,18 @@ canvas {
   margin-top: 16px;
 }
 
+.detail-summary #detailIssueId {
+  color: var(--accent);
+  cursor: pointer;
+  pointer-events: auto;
+  text-decoration: none;
+}
+
+.detail-summary #detailIssueId:hover,
+.detail-summary #detailIssueId:focus-visible {
+  text-decoration: underline;
+}
+
 .status-breakdown {
   display: grid;
   gap: 10px;
@@ -461,6 +491,58 @@ canvas {
 .status-item ul {
   margin: 0;
   padding-left: 18px;
+  color: var(--label);
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 140px 70px minmax(180px, 1fr) !important;
+  gap: 8px;
+  align-items: baseline;
+  padding-left: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.activity-row span:nth-child(2) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-header {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.activity-table {
+  width: 100%;
+  margin-top: 8px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.activity-table td {
+  padding: 3px 0;
+  border: 0;
+  vertical-align: top;
+}
+
+.activity-table td:nth-child(1) { width: 22%; }
+.activity-table td:nth-child(2) {
+  width: 12%;
+  padding-right: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.activity-table td:nth-child(3) {
+  width: 66%;
+  padding-left: 0;
+}
+
+.activity-empty {
+  margin: 10px 0 0;
   color: var(--label);
 }
 

@@ -196,10 +196,10 @@ function setupUserIssueSortHeaders() {
   const headerRow = table?.querySelector("thead tr");
   if (!headerRow) return;
   headerRow.id = "userIssueSortHeaders";
+  headerRow.removeChild(headerRow.children[5]);
   [
     { index: 3, key: "hours", label: "合計時間" },
-    { index: 5, key: "issue_status_count", label: "ステータス数" },
-    { index: 6, key: "issue_transition_count", label: "遷移回数" },
+    { index: 5, key: "issue_transition_count", label: "遷移回数（担当者）" },
   ].forEach(({ index, key, label }) => {
     const header = headerRow.children[index];
     const button = document.createElement("button");
@@ -219,6 +219,24 @@ function setupUserIssueSortHeaders() {
     header.textContent = "";
     header.appendChild(button);
   });
+  const totalHeader = document.createElement("th");
+  totalHeader.className = "text-end";
+  const totalButton = document.createElement("button");
+  totalButton.type = "button";
+  totalButton.className = "table-sort-button";
+  totalButton.dataset.sortKey = "issue_total_transition_count";
+  totalButton.innerHTML = '総遷移回数 <span class="sort-indicator" aria-hidden="true">↕</span>';
+  totalButton.addEventListener("click", () => {
+    if (userIssueSort.key === "issue_total_transition_count") {
+      userIssueSort.direction = userIssueSort.direction === "asc" ? "desc" : "asc";
+    } else {
+      userIssueSort = { key: "issue_total_transition_count", direction: "desc" };
+    }
+    updateUserIssueSortIndicators();
+    renderUserIssueTable();
+  });
+  totalHeader.appendChild(totalButton);
+  headerRow.appendChild(totalHeader);
   updateUserIssueSortIndicators();
 }
 
@@ -233,8 +251,8 @@ function renderUserIssueTable() {
     { key: "issue_fixed_version_name" },
     { key: "hours", align: "end", format: hours },
     { key: "activity_breakdown" },
-    { key: "issue_status_count", align: "end" },
     { key: "issue_transition_count", align: "end", format: (value) => `${value || 0}回` },
+    { key: "issue_total_transition_count", align: "end", format: (value) => `${value || 0}回` },
   ]);
 }
 
@@ -463,7 +481,8 @@ async function analyze() {
   baseAnalysis = null;
   byId("analyzeButton").disabled = true;
   byId("excelExportButton").disabled = true;
-  byId("analyzeButton").textContent = "分析中";
+  byId("analyzeButton").setAttribute("aria-busy", "true");
+  byId("analyzeButton").innerHTML = '<span class="loading-spinner" aria-hidden="true"></span><span>分析中</span>';
   try {
     const response = await fetch("/api/analyze", {
       method: "POST",
@@ -486,6 +505,7 @@ async function analyze() {
     showError("通信に失敗しました。Flaskアプリが起動しているか確認してください。");
   } finally {
     byId("analyzeButton").disabled = false;
+    byId("analyzeButton").removeAttribute("aria-busy");
     byId("analyzeButton").textContent = "分析実行";
   }
 }
