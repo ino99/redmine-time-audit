@@ -208,6 +208,7 @@ p {
 .content-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: auto auto;
   gap: 16px;
 }
 
@@ -218,6 +219,31 @@ p {
 
 .panel.wide {
   grid-column: 1 / -1;
+}
+
+.panel.right-column {
+  grid-column: 2;
+}
+
+.content-grid > .panel:has(#activityChart) {
+  grid-row: span 2;
+  align-self: start;
+  height: fit-content;
+}
+
+.content-grid > .panel:has(#projectChart) canvas {
+  height: 245px !important;
+}
+
+.content-grid > .panel:has(#projectChart),
+.content-grid > .panel:has(#versionActivityChart) {
+  align-self: stretch;
+}
+
+.content-grid > .panel:has(#versionActivityChart) canvas {
+  height: 300px !important;
+  width: 100% !important;
+  display: block;
 }
 
 .panel-header {
@@ -598,6 +624,14 @@ canvas {
   .summary-grid,
   .content-grid {
     grid-template-columns: 1fr;
+  }
+
+  .panel.right-column {
+    grid-column: auto;
+  }
+
+  .content-grid > .panel:has(#activityChart) {
+    grid-row: auto;
   }
 
   .metric {

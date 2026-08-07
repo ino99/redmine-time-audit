@@ -101,7 +101,7 @@ function issueDetailLink(issueId) {
   return link;
 }
 
-function renderBarChart(id, labels, values, label) {
+function renderBarChart(id, labels, values, label, colorMap = null) {
   if (charts[id]) charts[id].destroy();
   const textColor = cssVar("--text");
   const mutedColor = cssVar("--muted");
@@ -113,7 +113,7 @@ function renderBarChart(id, labels, values, label) {
       datasets: [{
         label,
         data: values,
-        backgroundColor: labels.map((_, index) => palette[index % palette.length]),
+        backgroundColor: labels.map((name, index) => colorMap?.get(name) || palette[index % palette.length]),
         borderRadius: 4,
       }],
     },
@@ -145,6 +145,28 @@ function renderBarChart(id, labels, values, label) {
   });
 }
 
+function syncSummaryPanelHeights() {
+  const activityPanel = document.querySelector(".content-grid > .panel:has(#activityChart)");
+  const projectPanel = document.querySelector(".content-grid > .panel:has(#projectChart)");
+  const versionPanel = document.querySelector(".content-grid > .panel:has(#versionActivityChart)");
+  if (!activityPanel || !projectPanel || !versionPanel) return;
+
+  if (window.innerWidth <= 760) {
+    projectPanel.style.height = "";
+    versionPanel.style.height = "";
+    return;
+  }
+
+  projectPanel.style.height = "";
+  versionPanel.style.height = "";
+  requestAnimationFrame(() => {
+    const availableHeight = activityPanel.getBoundingClientRect().height - 16;
+    const panelHeight = Math.max(0, availableHeight / 2);
+    projectPanel.style.height = `${panelHeight}px`;
+    versionPanel.style.height = `${panelHeight}px`;
+  });
+}
+
 function renderSummary(summary) {
   byId("totalHours").textContent = hours(summary.total_hours);
   byId("userCount").textContent = summary.user_count;
@@ -168,6 +190,73 @@ function renderVersionOptions(data) {
     select.appendChild(option);
   });
   select.disabled = !(data.versions || []).length;
+}
+
+function renderVersionActivityChart(rows, colorMap = null) {
+  const id = "versionActivityChart";
+  if (charts[id]) charts[id].destroy();
+  const canvas = byId(id);
+  if (!canvas) return;
+
+  const labels = [...new Set((rows || []).map((row) => row.version_name))];
+  const activities = [...new Set((rows || []).map((row) => row.activity_name))];
+  const values = new Map((rows || []).map((row) => [`${row.version_name}\u0000${row.activity_name}`, Number(row.hours || 0)]));
+  const textColor = cssVar("--text");
+  const mutedColor = cssVar("--muted");
+  const lineColor = cssVar("--line");
+  charts[id] = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: activities.map((activity, index) => ({
+        label: activity,
+        data: labels.map((version) => values.get(`${version}\u0000${activity}`) || 0),
+        backgroundColor: colorMap?.get(activity) || palette[index % palette.length],
+        borderWidth: 0,
+      })),
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      plugins: {
+        legend: {
+          display: true,
+          labels: {
+            color: textColor,
+            usePointStyle: true,
+            pointStyle: "circle",
+            boxWidth: 8,
+            boxHeight: 8,
+            padding: 8,
+          },
+        },
+        tooltip: {
+          backgroundColor: cssVar("--panel"),
+          titleColor: textColor,
+          bodyColor: textColor,
+          borderColor: lineColor,
+          borderWidth: 1,
+          callbacks: { label: (context) => `${context.dataset.label}: ${hours(context.raw)}` },
+        },
+      },
+      maintainAspectRatio: false,
+      layout: { padding: { left: 0, right: 0 } },
+      scales: {
+        x: {
+          stacked: true,
+          beginAtZero: true,
+          title: { display: true, text: "hours", color: mutedColor },
+          ticks: { color: mutedColor, padding: 0 },
+          grid: { color: lineColor },
+        },
+        y: {
+          stacked: true,
+          ticks: { color: mutedColor, padding: 0 },
+          grid: { color: lineColor },
+        },
+      },
+    },
+  });
 }
 
 let userIssueSort = { key: "hours", direction: "desc" };
@@ -444,6 +533,11 @@ function renderAnalysis(data, options = {}) {
   renderBarChart("userRankingChart", data.user_ranking.map((r) => r.user_name), data.user_ranking.map((r) => r.hours), "ユーザー別");
   renderBarChart("activityChart", data.activity_summary.map((r) => r.activity_name), data.activity_summary.map((r) => r.hours), "作業分類別");
   renderBarChart("projectChart", data.project_summary.map((r) => r.project_name), data.project_summary.map((r) => r.hours), "プロジェクト別");
+  const activityColorMap = new Map(
+    data.activity_summary.map((row, index) => [row.activity_name, palette[index % palette.length]])
+  );
+  renderVersionActivityChart(data.version_activity_summary, activityColorMap);
+  syncSummaryPanelHeights();
 
   const userSelect = byId("userSelect");
   userSelect.innerHTML = "";
@@ -611,6 +705,7 @@ document.querySelectorAll(".export-button").forEach((button) => {
 });
 setupUserIssueSortHeaders();
 setupGadgetDragging();
+window.addEventListener("resize", syncSummaryPanelHeights);
 document.addEventListener("themechange", () => {
   if (latestAnalysis) {
     renderAnalysis(latestAnalysis, { persist: false });

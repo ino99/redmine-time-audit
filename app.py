@@ -700,13 +700,14 @@ def build_issue_flow(issue, entries, status_names, redmine_url=None, assignee_na
     transition_rows = []
     initial_status_name = status_name(initial_status, status_names)
     if initial_status_name.lower() == "new":
+        initial_changed_at = parse_datetime(issue.get("created_on"))
         transition_rows.append({
             "type": "initial",
             "progress_rate": 0.0,
             "from": "",
             "to": initial_status_name,
             "assignee": "未アサイン",
-            "changed_at": issue.get("created_on") or "",
+            "changed_at": initial_changed_at.isoformat() if initial_changed_at else "",
         })
     for event in history_events:
         changed_at = event.get("changed_at")
@@ -807,6 +808,14 @@ def build_analysis_from_rows(rows, redmine_url=None):
         .sort_values("hours", ascending=False)
     ) if not df.empty else pd.DataFrame(columns=["project_name", "hours"])
 
+    version_activity_df = (
+        df.assign(version_name=df["issue_fixed_version_name"].apply(version_label))
+        .groupby(["version_name", "activity_name"], dropna=False)["hours"]
+        .sum()
+        .reset_index()
+        .sort_values(["version_name", "hours"], ascending=[True, False])
+    ) if not df.empty else pd.DataFrame(columns=["version_name", "activity_name", "hours"])
+
     user_issue_df = pd.DataFrame(columns=[
         "user_name", "issue_id", "issue_subject", "issue_fixed_version_name",
         "issue_url", "hours", "activity_breakdown",
@@ -880,6 +889,7 @@ def build_analysis_from_rows(rows, redmine_url=None):
         "user_ranking": records(user_ranking_df),
         "activity_summary": records(activity_df),
         "project_summary": records(project_df),
+        "version_activity_summary": records(version_activity_df),
         "user_issue_top10": records(user_issue_df),
         "users": sorted(df["user_name"].dropna().unique().tolist()) if not df.empty else [],
         "versions": version_options,
@@ -1153,6 +1163,7 @@ def export_csv(export_name):
         "user_issue_top10": data.get("user_issue_top10", []),
         "activity_summary": data.get("activity_summary", []),
         "project_summary": data.get("project_summary", []),
+        "version_activity_summary": data.get("version_activity_summary", []),
     }
     if export_name not in export_map:
         return jsonify({"error": "未対応のCSV種別です。"}), 404
